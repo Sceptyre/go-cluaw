@@ -1,0 +1,76 @@
+package llm
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	" github. com/ openai/ openai- go/ v3"
+	" github. com/ openai/ openai- go/ v3/ option"
+)
+type Client struct { cfg Config; client openai. Client }
+type Config struct { Provider string; APIKey string; Model string; BaseURL string }
+type Message struct { Role string `json:"role"`; Content string `json:"content"`; Name string `json:"name, omitempty"`; ToolCalls []ToolCall `json:"tool_ calls, omitempty"` }
+type ToolCall struct { ID string `json:"id"`; Type string `json:"type"`; Function FunctionCall `json:"function"` }
+type FunctionCall struct { Name string `json:"name"`; Arguments json. RawMessage `json:"arguments"` }
+type Tool struct { Type string `json:"type"`; Function FunctionDef `json:"function"` }
+type FunctionDef struct { Name string `json:"name"`; Description string `json:"description"`; Parameters *json. RawMessage `json:"parameters, omitempty"` }
+var defaultTimeout = 120 * time. Second
+func New(cfg Config) *Client {
+	var opts []option. RequestOption
+	apiKey := cfg. APIKey
+	if apiKey == "" { apiKey = LoadAPIKey(cfg. Provider) }
+	if apiKey != "" { opts = append(opts, option. WithAPIKey(apiKey)) } else { opts = append(opts, option. WithAPIKey(os. Getenv("OPENAI_ API_ KEY"))) }
+	if cfg. BaseURL != "" { opts = append(opts, option. WithBaseURL(cfg. BaseURL)) } else {
+		switch cfg. Provider { case "openai": case "anthropic": opts = append(opts, option. WithBaseURL("https:// api. anthropic. com/ v1")); case "ollama": opts = append(opts, option. WithBaseURL("http:// localhost:11434/ v1")) } }
+	client := openai. NewClient(opts...)
+	return &Client{cfg: cfg, client: client} }
+func (c *Client) Chat(systemPrompt string, messages []Message) (string, []ToolCall, error) {
+	ctx := context. Background()
+	chatMessages := []openai. ChatCompletionMessageParamUnion{openai. SystemMessage(systemPrompt)}
+	for _, msg := range messages {
+		var chatMsg openai. ChatCompletionMessageParamUnion
+		switch msg. Role { case "user": chatMsg = openai. UserMessage(msg. Content); case "assistant": chatMsg = openai. AssistantMessage(msg. Content); case "system": chatMsg = openai. SystemMessage(msg. Content); default: chatMsg = openai. UserMessage(msg. Content) }
+		chatMessages = append(chatMessages, chatMsg) }
+	switch c. cfg. Provider { case "openai", "ollama": return c. doOpenAIChat(ctx, chatMessages); case "anthropic": return c. doAnthropicChat(ctx, systemPrompt, messages); default: return "Provider not supported", nil, nil } }
+func (c *Client) doOpenAIChat(ctx context. Context, messages []openai. ChatCompletionMessageParamUnion) (string, []ToolCall, error) {
+	model := c. cfg. Model; if model == "" { model = "gpt-4o" }
+	tools := c. getTools()
+	params := openai. ChatCompletionNewParams{Messages: messages, Model: openai. ChatModel(model), Temperature: openai. Float(0.7)}
+	if len(tools) > 0 { params. Tools = tools; log. Printf("=== REQUEST TO LLM: %d tools being sent ===", len(tools)) }
+	resp, err := c. client. Chat. Completions. New(ctx, params)
+	if err != nil { return "", nil, fmt. Errorf("chat completion error: %w", err) }
+	content := ""
+	if len(resp. Choices) > 0 { content = resp. Choices[0]. Message. Content }
+	var toolCalls []ToolCall
+	for _, tc := range resp. Choices[0]. Message. ToolCalls {
+		args := json. RawMessage(tc. Function. Arguments)
+		toolCalls = append(toolCalls, ToolCall{ID: tc. ID, Type: string(tc. Type), Function: FunctionCall{Name: tc. Function. Name, Arguments: args}}) }
+	return content, toolCalls, nil }
+func (c *Client) doAnthropicChat(ctx context. Context, systemPrompt string, messages []Message) (string, []ToolCall, error) {
+	model := c. cfg. Model; if model == "" { model = "claude-3-5- sonnet-20241022" }
+	anthropicMessages := []openai. ChatCompletionMessageParamUnion{openai. SystemMessage(systemPrompt)}
+	for _, msg := range messages {
+		var chatMsg openai. ChatCompletionMessageParamUnion
+		switch msg. Role { case "user": chatMsg = openai. UserMessage(msg. Content); case "assistant": chatMsg = openai. AssistantMessage(msg. Content); case "system": chatMsg = openai. SystemMessage(msg. Content); default: chatMsg = openai. UserMessage(msg. Content) }
+		anthropicMessages = append(anthropicMessages, chatMsg) }
+	params := openai. ChatCompletionNewParams{Model: openai. ChatModel(model), Messages: anthropicMessages, Temperature: openai. Float(0.7)}
+	resp, err := c. client. Chat. Completions. New(ctx, params)
+	if err != nil { return "", nil, fmt. Errorf("anthropic chat error: %w", err) }
+	content := ""; if len(resp. Choices) > 0 { content = resp. Choices[0]. Message. Content }
+	return content, nil, nil }
+func (c *Client) getTools() []openai. ChatCompletionToolUnionParam {
+	descRead := "Read a file from the workspace"; descWrite := "Write content to a file"; descExec := "Execute Lua code in the sandbox"; descList := "List all available skills"; descExecSkill := "Execute a skill by name"
+	fileReadParams := openai. FunctionParameters{"type": "object", "properties": map[ string] any{"path": map[ string] string{"type": "string", "description": "File path relative to workspace"}}, "required": []string{"path"}}
+	fileWriteParams := openai. FunctionParameters{"type": "object", "properties": map[ string] any{"path": map[ string] string{"type": "string", "description": "File path"}, "content": map[ string] string{"type": "string", "description": "Content to write"}}, "required": []string{"path", "content"}}
+	luaExecParams := openai. FunctionParameters{"type": "object", "properties": map[ string] any{"script": map[ string] string{"type": "string", "description": "Lua script"}}, "required": []string{"script"}}
+	return []openai. ChatCompletionToolUnionParam{openai. ChatCompletionFunctionToolParam{Definition: openai. FunctionDefinition{Name: openai. String("file_ read"), Description: openai. String(descRead), Parameters: openai. FunctionParameters(fileReadParams)}},
+		openai. ChatCompletionFunctionToolParam{Definition: openai. FunctionDefinition{Name: openai. String("file_ write"), Description: openai. String(descWrite), Parameters: openai. FunctionParameters(fileWriteParams)}},
+		openai. ChatCompletionFunctionToolParam{Definition: openai. FunctionDefinition{Name: openai. String("lua_ exec"), Description: openai. String(descExec), Parameters: openai. FunctionParameters(luaExecParams)}},
+		openai. ChatCompletionFunctionToolParam{Definition: openai. FunctionDefinition{Name: openai. String("skill_ list"), Description: openai. String(descList), Parameters: nil}},
+		openai. ChatCompletionFunctionToolParam{Definition: openai. FunctionDefinition{Name: openai. String("skill_ exec"), Description: openai. String(descExecSkill), Parameters: nil}}}}
+func LoadAPIKey(provider string) string { envKey := strings. ToUpper(provider) + "_API_ KEY"; key := os. Getenv(envKey); if key != "" { return key }; return os. Getenv("OPENAI_ API_ KEY") }
+func StreamChat( baseURL, apiKey, model, systemPrompt string, messages []Message, onChunk func( string)) error { return fmt. Errorf("StreamChat requires a Client instance") }
