@@ -19,6 +19,23 @@ import (
 	"github.com/sceptye/go-cluaw/internal/workspace"
 )
 
+// memoryAdapter wraps memory.Get and memory.Store to satisfy lua.MemoryOperator.
+type memoryAdapter struct {
+	get    *memory.Get
+	store  *memory.Store
+	wsPath string
+}
+
+func (m *memoryAdapter) Today() (string, error)          { return m.get.Today() }
+func (m *memoryAdapter) ByReference(ref string) (string, error) { return m.get.ByReference(ref) }
+func (m *memoryAdapter) ByTag(tag string) (string, error)       { return m.get.ByTag(tag) }
+func (m *memoryAdapter) ByDate(date string) (string, error)     { return m.get.ByDate(date) }
+func (m *memoryAdapter) AppendToToday(entry string) error       { return m.store.AppendToToday(entry) }
+func (m *memoryAdapter) Search(query string) (string, error) {
+	idx := memory.NewIndex(m.wsPath)
+	return idx.Search(query)
+}
+
 // =============================================================================
 // CONSTANTS
 // =============================================================================
@@ -214,16 +231,37 @@ func New(cfg *config.Config, ws *workspace.Workspace, store *session.Store, log 
 		apiKey = llm.LoadAPIKey(cfg.LLM.Provider)
 	}
 
-	// Initialize Lua sandbox (scheduler will be set later via SetScheduler if available)
-	timeout := time.Duration(cfg.Lua.TimeoutSeconds) * time.Second
-	luaBox := lua.New(timeout, []string{cfg.ExpandWorkspace()}, nil)
+	workspacePath := cfg.ExpandWorkspace()
+
+	// Create tool instances first (shared between Lua sandbox and Registry)
+	fileTool := tools.NewFileTool(workspacePath)
+	webTool := tools.NewWebTool()
+	browserTool := tools.NewBrowserTool()
+	memStore := memory.NewStore(workspacePath)
+	memStore.EnsureTodayExists()
+	memGet := memory.NewGet(workspacePath)
+	memAdapter := &memoryAdapter{
+		get:    memGet,
+		store:  memStore,
+		wsPath: workspacePath,
+	}
 
 	// Initialize skill loader
-	skills := lua.NewSkillLoader(cfg.ExpandWorkspace())
+	skills := lua.NewSkillLoader(workspacePath)
+
+	// Initialize Lua sandbox with all tool dependencies
+	timeout := time.Duration(cfg.Lua.TimeoutSeconds) * time.Second
+	luaBox := lua.NewWithTools(
+		timeout,
+		[]string{workspacePath},
+		nil, // scheduler set later
+		fileTool, webTool, browserTool,
+		memAdapter, skills,
+	)
 
 	// Initialize GitOps manager
 	gitMgr := gitops.New(
-		cfg.ExpandWorkspace(),
+		workspacePath,
 		cfg.GitOps.AutoCommit,
 		cfg.GitOps.ErrorThreshold,
 		cfg.GitOps.CommitMessagePrefix,
@@ -237,15 +275,11 @@ func New(cfg *config.Config, ws *workspace.Workspace, store *session.Store, log 
 		BaseURL:  cfg.LLM.BaseURL,
 	})
 
-	// Create tool registry
-	toolRegistry := tools.NewRegistry(cfg.ExpandWorkspace(), luaBox, skills, toolLLMCli, log, nil)
-
-	// Initialize memory store
-	memStore := memory.NewStore(cfg.ExpandWorkspace())
-	memStore.EnsureTodayExists()
+	// Create tool registry (shares the same tool instances with Lua sandbox)
+	toolRegistry := tools.NewRegistry(workspacePath, luaBox, skills, toolLLMCli, log, nil, fileTool, webTool, browserTool)
 
 	// Initialize self-improvement detector
-	detector := self_improve.NewDetector(cfg.ExpandWorkspace(), cfg.GitOps.ErrorThreshold)
+	detector := self_improve.NewDetector(workspacePath, cfg.GitOps.ErrorThreshold)
 
 	return &Agent{
 		cfg:   cfg,
@@ -1556,88 +1590,25 @@ func (a *Agent) buildSystemPrompt() (string, error) {
 
 	// Add explicit instruction about tool calling
 	prompt += "\n\n## Tool Calling Instructions\n"
-	prompt += "When you need to use a tool, the tool definitions are sent to you automatically.\n"
-	prompt += "Simply return the function name and arguments - the API handles the format via the tool_calls parameter.\n"
-	prompt += "Do NOT output JSON as text - use structured function calls.\n"
-
-	// Add emphasis on lua_exec as primary tool
-	prompt += "\n\n## Tool Priority\n"
-	prompt += "When the user asks for something that requires action (calculations, file operations, web fetching, etc), use lua_exec FIRST before using other tools.\n"
-	prompt += "- lua_exec is the primary means of doing something outside of speaking\n"
-	prompt += "- Other tools (file, web_fetch, etc) are secondary\n"
+	prompt += "You have 3 tools available:\n\n"
+	prompt += "1. **lua_exec** — Your PRIMARY tool for ALL world interaction.\n"
+	prompt += "   Use this to execute Lua code. The sandbox provides these modules:\n"
+	prompt += "   - file.read/write/edit/list — File operations\n"
+	prompt += "   - web.fetch/search — Web page fetching and searching\n"
+	prompt += "   - browser.navigate/click/type/screenshot — Browser automation\n"
+	prompt += "   - memory.today/get/write/search — Memory management\n"
+	prompt += "   - skill.list/exec/create — Skill management\n"
+	prompt += "   - scheduler.add/remove/list — Scheduled tasks\n"
+	prompt += "   - os.date/time, time.time/date — Time utilities\n"
+	prompt += "   - print() — Capture intermediate output\n"
+	prompt += "   RULE: If you need to interact with files, the web, memory, or any external system, do it through lua_exec.\n\n"
+	prompt += "2. **message** — Call ONLY when you have the final response for the user.\n"
+	prompt += "   Do NOT call message for intermediate steps. Use print() in lua_exec to see results.\n\n"
+	prompt += "3. **scientific_method_plan** — Call for structured planning and analysis.\n"
+	prompt += "   Generates a JSON plan with tools_needed, predictions, and success_criteria.\n\n"
+	prompt += "Tool calls are handled via the API's tool_calls parameter. Return the function name and arguments."
 
 	return prompt, nil
 }
 
-// =============================================================================
-// TOOL IMPLEMENTATIONS
-// =============================================================================
 
-// toolFileRead implements the file_read tool
-func (a *Agent) toolFileRead(args json.RawMessage) (string, error) {
-	var input struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return "", err
-	}
-
-	content, err := a.ws.ReadFile(input.Path)
-	if err != nil {
-		return "", err
-	}
-
-	return string(content), nil
-}
-
-// toolFileWrite implements the file_write tool
-func (a *Agent) toolFileWrite(args json.RawMessage) (string, error) {
-	var input struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return "", err
-	}
-
-	if err := a.ws.WriteFile(input.Path, []byte(input.Content)); err != nil {
-		return "", err
-	}
-
-	if a.gitMgr != nil {
-		a.gitMgr.CommitSkillChange(input.Path, "file write")
-	}
-
-	return "File written successfully", nil
-}
-
-// toolLuaExec implements the lua_exec tool
-func (a *Agent) toolLuaExec(args json.RawMessage) (string, error) {
-	var input struct {
-		Script string `json:"script"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return "", err
-	}
-
-	return a.luaBox.Execute(input.Script, "")
-}
-
-// toolSkillList implements the skill_list tool
-func (a *Agent) toolSkillList() (string, error) {
-	skills, err := a.skills.List()
-	if err != nil {
-		return "", err
-	}
-
-	if len(skills) == 0 {
-		return "No skills available", nil
-	}
-
-	result := "Available skills:\n"
-	for _, name := range skills {
-		result += "- " + name + "\n"
-	}
-
-	return result, nil
-}

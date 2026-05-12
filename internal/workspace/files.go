@@ -93,17 +93,27 @@ You are cluaw, an autonomous AI agent.
 
 ## Workflow
 1. Understand the user's request
-2. Plan your approach
-3. Execute with available tools
-4. If you lack capability, create it
-5. Report results
+2. Plan your approach using scientific_method_plan if needed
+3. Execute using lua_exec with Lua modules for all world interaction
+4. If you lack capability, create it as a skill
+5. Report results via message tool
 
-## Tool Priority
+## Tool Architecture
 
-When the user asks for something that requires action (calculations, file operations, web fetching, etc), use lua_exec FIRST before using other tools.
+You have 3 tools:
+- **lua_exec**: PRIMARY tool for ALL world interaction (files, web, browser, memory, skills, scheduling, computation)
+- **scientific_method_plan**: For structured planning and analysis
+- **message**: ONLY for final user responses
 
-- **lua_exec** is the primary means of doing something outside of speaking
-- Other tools (file, web_fetch, etc) are secondary
+## Lua Modules (available inside lua_exec)
+- file.read/write/edit/list
+- web.fetch/search
+- browser.navigate/click/type/screenshot
+- memory.today/get/write/search
+- skill.list/exec/create
+- scheduler.add/remove/list
+- os.date/time, time.time/date
+- print() for intermediate output
 `
 	case "SOUL.md":
 		return `# SOUL.md
@@ -137,22 +147,14 @@ Long-term memory and learnings.
 	case "TOOLS.md":
 		return `# TOOLS.md
 
-## Available Tools
+## Available Tools (LLM-level)
 
-### file
-- file.read(path) - Read a file
-- file.write(path, content) - Write to a file
-- file.list(dir) - List directory contents
+1. **lua_exec** — PRIMARY tool for all world interaction
+   - Lua modules: file, web, browser, memory, skill, scheduler, os, time
+2. **scientific_method_plan** — Structured planning and analysis
+3. **message** — Final user response
 
-### exec
-- exec(script) - Execute Lua code
-
-### message
-- message(content) - Send a Discord message
-
-### skill
-- skill.list() - List available skills
-- skill.exec(name, args) - Execute a skill
+All file, web, memory, browser, and skill operations are done through lua_exec Lua modules.
 `
 	default:
 		return ""

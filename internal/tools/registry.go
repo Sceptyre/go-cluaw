@@ -55,102 +55,24 @@ type toolDefinition struct {
 // Tool Definitions - Used for dynamic documentation generation
 // =============================================================================
 
-// toolDocsMap defines all available tools and their documentation.
-// This allows GetToolDocs() to generate documentation dynamically.
+// toolDocsMap defines available tools for documentation generation.
+// World-interaction tools are accessed through lua_exec Lua modules.
+// Only system/orchestration tools are defined at the Go tool level.
 var toolDocsMap = map[string]toolDefinition{
-	// File tools
-	"file_read": {
-		name:        "file_read",
-		description: "Read a file from the workspace.",
-		args:        `{"path": "file.txt"}`,
-	},
-	"file_write": {
-		name:        "file_write",
-		description: "Write content to a file in the workspace.",
-		args:        `{"path": "file.txt", "content": "..."}`,
-	},
-	"file_edit": {
-		name:        "file_edit",
-		description: "Edit a file with search/replace.",
-		args:        `{"path": "file.txt", "search": "old", "replace": "new"}`,
-	},
-	// Web tools
-	"web_fetch": {
-		name:        "web_fetch",
-		description: "Fetch a web page.",
-		args:        `{"url": "https://..."}`,
-	},
-	// Browser tools
-	"browser_navigate": {
-		name:        "browser_navigate",
-		description: "Navigate browser to URL.",
-		args:        `{"url": "https://..."}`,
-	},
-	"browser_click": {
-		name:        "browser_click",
-		description: "Click element in browser.",
-		args:        `{"selector": "#button"}`,
-	},
-	"browser_type": {
-		name:        "browser_type",
-		description: "Type into element in browser.",
-		args:        `{"selector": "#input", "text": "..."}`,
-	},
-	"browser_screenshot": {
-		name:        "browser_screenshot",
-		description: "Capture a screenshot of the current browser state.",
-		args:        "No args",
-	},
-	// Memory tools
-	"memory_search": {
-		name:        "memory_search",
-		description: "Search memory using grep.",
-		args:        `{"query": "term"}`,
-	},
-	"memory_get": {
-		name:        "memory_get",
-		description: "Get memory by reference, tag, or date.",
-		args:        `{"reference": "file.md"} or {"tag": "tag"} or {"date": "2026-04-01"}`,
-	},
-	"memory_write": {
-		name:        "memory_write",
-		description: "Write to today's memory.",
-		args:        `{"entry": "note text"}`,
-	},
-	// Lua tools
 	"lua_exec": {
 		name:        "lua_exec",
-		description: "Execute Lua code in sandbox.",
-		args:        `{"script": "print(1+1)"}`,
+		description: "Execute Lua code. PRIMARY tool for ALL world interaction. Modules: file, web, browser, memory, skill, scheduler, os, time",
+		args:        `{"script": "file.read('/path')"}`,
 	},
-	// Skill tools
-	"skill_list": {
-		name:        "skill_list",
-		description: "List available skills.",
-		args:        "No args",
-	},
-	"skill_create": {
-		name:        "skill_create",
-		description: "Create a new skill.",
-		args:        `{"name": "skill-name", "description": "...", "instructions": "..."}`,
-	},
-	// Planning tool
-	"scientific_method_plan": {
-		name:        "scientific_method_plan",
-		description: "Generate structured plan schema for the scientific method workflow. This tool enforces schema output for decision making.",
-		args:        `{"user_request": "..."}`,
-	},
-	// Schedule tools
-	"schedule_list": {
-		name:        "schedule_list",
-		description: "List all scheduled tasks.",
-		args:        "No args",
-	},
-	// Utility tools
 	"message": {
 		name:        "message",
-		description: "Return a message content (passthrough).",
+		description: "Send final response to the user.",
 		args:        `{"content": "..."}`,
+	},
+	"scientific_method_plan": {
+		name:        "scientific_method_plan",
+		description: "Generate structured plan for scientific method workflow.",
+		args:        `{"user_request": "..."}`,
 	},
 }
 
@@ -166,12 +88,24 @@ var toolDocsMap = map[string]toolDefinition{
 //   - llmCli: LLM client for advanced planning
 //   - log: Logger for debugging output
 //   - sched: Scheduler for managing scheduled tasks
-func NewRegistry(workspace string, luaBox *lua.Sandbox, skills *lua.SkillLoader, llmCli *llm.Client, log *logger.Logger, sched *scheduler.Scheduler) *Registry {
+//   - file: Pre-created FileTool (or nil to create one)
+//   - web: Pre-created WebTool (or nil to create one)
+//   - browser: Pre-created BrowserTool (or nil to create one)
+func NewRegistry(workspace string, luaBox *lua.Sandbox, skills *lua.SkillLoader, llmCli *llm.Client, log *logger.Logger, sched *scheduler.Scheduler, file *FileTool, web *WebTool, browser *BrowserTool) *Registry {
+	if file == nil {
+		file = NewFileTool(workspace)
+	}
+	if web == nil {
+		web = NewWebTool()
+	}
+	if browser == nil {
+		browser = NewBrowserTool()
+	}
 	return &Registry{
 		workspace: workspace,
-		file:      NewFileTool(workspace),
-		web:       NewWebTool(),
-		browser:   NewBrowserTool(),
+		file:      file,
+		web:       web,
+		browser:   browser,
 		memory:    memory.NewGet(workspace),
 		self:      self_improve.NewCreator(workspace),
 		detector:  self_improve.NewDetector(workspace, 3),
@@ -309,26 +243,28 @@ func (registry *Registry) Close() error {
 }
 
 // GetToolDocs generates markdown documentation for all available tools.
-// It dynamically builds the documentation from the toolDocsMap.
 func (registry *Registry) GetToolDocs() string {
 	var sb strings.Builder
 
-	sb.WriteString("## Tool Calling Instructions\n")
-	sb.WriteString("- When you need to use a tool, the tool definitions are sent to you automatically.\n")
-	sb.WriteString("- Simply return the function name and arguments - the API handles the format via the tool_calls parameter.\n")
-	sb.WriteString("- Do NOT output JSON as text - use structured function calls.\n\n")
-	sb.WriteString("## Tools\n\n")
+	sb.WriteString("## Go-Level Tools\n\n")
+	sb.WriteString("These are the tools exposed to the LLM:\n\n")
 
-	// Generate documentation from the tool map
 	for _, def := range toolDocsMap {
 		sb.WriteString(fmt.Sprintf("### %s\n", def.name))
 		sb.WriteString(fmt.Sprintf("%s\n", def.description))
 		sb.WriteString(fmt.Sprintf("Args: %s\n\n", def.args))
 	}
 
-	// Add special documentation for scientific_method_plan return format
-	sb.WriteString("### scientific_method_plan\n")
-	sb.WriteString("Returns: {\"step\": \"experiment\", \"intent\": \"...\", \"tools_needed\": [...], \"predictions\": [...], \"success_criteria\": [...], \"ready\": bool, \"reasoning\": \"...\"}\n")
+	sb.WriteString("### Lua Modules (inside lua_exec)\n")
+	sb.WriteString("All world interaction is done through lua_exec with these Lua modules:\n")
+	sb.WriteString("- file.read/write/edit/list\n")
+	sb.WriteString("- web.fetch/search\n")
+	sb.WriteString("- browser.navigate/click/type/screenshot\n")
+	sb.WriteString("- memory.today/get/write/search\n")
+	sb.WriteString("- skill.list/exec/create\n")
+	sb.WriteString("- scheduler.add/remove/list\n")
+	sb.WriteString("- os.date/time, time.time/date\n")
+	sb.WriteString("- print() for intermediate output\n")
 
 	return sb.String()
 }
@@ -627,7 +563,7 @@ Output ONLY valid JSON:
   "reasoning": "why this plan"
 }
 
-Use ONLY these tools: file_read, file_write, lua_exec, skill_list, memory_search`
+Use ONLY these tools: lua_exec (with file/web/memory/skill Lua modules), message`
 
 	prompt := strings.Replace(systemPrompt, "{user_request}", userRequest, 1)
 
@@ -651,7 +587,7 @@ Use ONLY these tools: file_read, file_write, lua_exec, skill_list, memory_search
 		planOutput := map[string]interface{}{
 			"step":             "experiment",
 			"intent":           "information_gathering",
-			"tools_needed":     []string{"memory_search"},
+			"tools_needed":     []string{"lua_exec"},
 			"predictions":      []string{"Information will be retrieved"},
 			"success_criteria": []string{"info_gathered", "no_errors"},
 			"ready":            true,
@@ -703,7 +639,7 @@ func fallbackPlan(userRequest string) string {
 
 	outputJSON, err := json.Marshal(planOutput)
 	if err != nil {
-		return `{"step":"experiment","intent":"information_gathering","tools_needed":["memory_search"],"predictions":["Information retrieved"],"success_criteria":["completed"],"ready":true,"reasoning":"fallback"}`
+		return `{"step":"experiment","intent":"information_gathering","tools_needed":["lua_exec"],"predictions":["Information retrieved"],"success_criteria":["completed"],"ready":true,"reasoning":"fallback"}`
 	}
 
 	return string(outputJSON)
@@ -730,19 +666,14 @@ func determineIntent(userRequest string) string {
 	return "information_gathering"
 }
 
-// determineToolsNeeded returns the appropriate tools based on the determined intent.
+// determineToolsNeeded returns appropriate tools for the intent.
+// All world interaction is done through lua_exec.
 func determineToolsNeeded(intent string) []string {
 	switch intent {
-	case "file_creation":
-		return []string{"file_write", "git_commit"}
-	case "file_access":
-		return []string{"file_read", "dir_list"}
-	case "computation":
+	case "file_creation", "file_access", "computation", "information_gathering":
 		return []string{"lua_exec"}
-	case "information_gathering":
-		return []string{"memory_search"}
 	default:
-		return []string{}
+		return []string{"lua_exec"}
 	}
 }
 

@@ -2,7 +2,6 @@ package lua
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +106,10 @@ func (l *SkillLoader) GetScriptPath(skillName, scriptName string) string {
 	return filepath.Join(l.workspace, "skills", skillName, "scripts", scriptName+".lua")
 }
 
+func (l *SkillLoader) Workspace() string {
+	return l.workspace
+}
+
 func (l *SkillLoader) ListScripts(skillName string) ([]string, error) {
 	path := filepath.Join(l.workspace, "skills", skillName, "scripts")
 	entries, err := os.ReadDir(path)
@@ -122,5 +125,3 @@ func (l *SkillLoader) ListScripts(skillName string) ([]string, error) {
 	}
 	return scripts, nil
 }
-
-var _ = io.Discard

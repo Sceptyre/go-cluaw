@@ -79,21 +79,9 @@ type FunctionDef struct {
 var defaultTimeout = 120 * time.Second
 
 // knownTools is a set of valid tool names for validation in the JSON fallback parser.
+// World-interaction tools have been consolidated into lua_exec Lua modules.
 var knownTools = map[string]bool{
-	"file_read":              true,
-	"file_write":             true,
-	"file_edit":              true,
-	"web_fetch":              true,
-	"browser_navigate":       true,
-	"browser_click":          true,
-	"browser_type":           true,
-	"browser_screenshot":     true,
-	"memory_search":          true,
-	"memory_get":             true,
-	"memory_write":           true,
 	"lua_exec":               true,
-	"skill_list":             true,
-	"skill_create":           true,
 	"message":                true,
 	"scientific_method_plan": true,
 }
@@ -407,333 +395,24 @@ func parsePotentialToolCall(content string) (*ToolCall, error) {
 // Private Methods - Tool Definitions
 // =============================================================================
 
-// getTools returns all available tools for function calling.
-// Tools are grouped by category: File, Web, Browser, Memory, Lua, Skills, and Utility.
-// This is used by OpenAI and Ollama providers which support native function calling.
+// getTools returns the tools exposed to the LLM.
+// Only system/orchestration tools are sent directly.
+// World interaction is delegated to lua_exec which exposes file, web, browser, memory, skill modules.
 func (c *Client) getTools() []openai.ChatCompletionToolUnionParam {
-	tools := []openai.ChatCompletionToolUnionParam{}
-
-	tools = append(tools, c.fileTools()...)
-	tools = append(tools, c.webTools()...)
-	tools = append(tools, c.browserTools()...)
-	tools = append(tools, c.memoryTools()...)
-	tools = append(tools, c.luaTools()...)
-	tools = append(tools, c.skillTools()...)
-	tools = append(tools, c.utilityTools()...)
-
-	return tools
+	return append(c.systemTools(), c.luaExecTool()...)
 }
 
-// fileTools returns file operation tools: read, write, edit.
-func (c *Client) fileTools() []openai.ChatCompletionToolUnionParam {
-	descRead := "Read a file from the workspace"
-	descWrite := "Write content to a file"
-	descEdit := "Edit a file with search and replace"
-
-	fileReadParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]string{
-				"type":        "string",
-				"description": "File path relative to workspace",
-			},
-		},
-		"required": []string{"path"},
-	}
-
-	fileWriteParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]string{
-				"type":        "string",
-				"description": "File path relative to workspace",
-			},
-			"content": map[string]string{
-				"type":        "string",
-				"description": "Content to write to file",
-			},
-		},
-		"required": []string{"path", "content"},
-	}
-
-	fileEditParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]string{
-				"type":        "string",
-				"description": "File path relative to workspace",
-			},
-			"search": map[string]string{
-				"type":        "string",
-				"description": "Text to search for in the file",
-			},
-			"replace": map[string]string{
-				"type":        "string",
-				"description": "Text to replace the search text with",
-			},
-		},
-		"required": []string{"path", "search", "replace"},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "file_read",
-			Description: openai.String(descRead),
-			Parameters:  fileReadParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "file_write",
-			Description: openai.String(descWrite),
-			Parameters:  fileWriteParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "file_edit",
-			Description: openai.String(descEdit),
-			Parameters:  fileEditParams,
-		}),
-	}
-}
-
-// webTools returns web fetch tools.
-func (c *Client) webTools() []openai.ChatCompletionToolUnionParam {
-	descWebFetch := "Fetch web page content"
-
-	webFetchParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"url": map[string]string{
-				"type":        "string",
-				"description": "URL to fetch",
-			},
-		},
-		"required": []string{"url"},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "web_fetch",
-			Description: openai.String(descWebFetch),
-			Parameters:  webFetchParams,
-		}),
-	}
-}
-
-// browserTools returns browser automation tools: navigate, click, type, screenshot.
-func (c *Client) browserTools() []openai.ChatCompletionToolUnionParam {
-	descBrowserNav := "Navigate browser to URL"
-	descBrowserClick := "Click element by CSS selector"
-	descBrowserType := "Type text into element"
-	descBrowserScreenshot := "Take a screenshot"
-
-	browserNavigateParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"url": map[string]string{
-				"type":        "string",
-				"description": "URL to navigate to",
-			},
-		},
-		"required": []string{"url"},
-	}
-
-	browserClickParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"selector": map[string]string{
-				"type":        "string",
-				"description": "CSS selector for the element to click",
-			},
-		},
-		"required": []string{"selector"},
-	}
-
-	browserTypeParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"selector": map[string]string{
-				"type":        "string",
-				"description": "CSS selector for the input element",
-			},
-			"text": map[string]string{
-				"type":        "string",
-				"description": "Text to type into the element",
-			},
-		},
-		"required": []string{"selector", "text"},
-	}
-
-	browserScreenshotParams := openai.FunctionParameters{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "browser_navigate",
-			Description: openai.String(descBrowserNav),
-			Parameters:  browserNavigateParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "browser_click",
-			Description: openai.String(descBrowserClick),
-			Parameters:  browserClickParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "browser_type",
-			Description: openai.String(descBrowserType),
-			Parameters:  browserTypeParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "browser_screenshot",
-			Description: openai.String(descBrowserScreenshot),
-			Parameters:  browserScreenshotParams,
-		}),
-	}
-}
-
-// memoryTools returns memory management tools: search, get, write.
-func (c *Client) memoryTools() []openai.ChatCompletionToolUnionParam {
-	descMemSearch := "Search memory with grep"
-	descMemGet := "Get memory by reference, tag, or date"
-	descMemWrite := "Write entry to memory"
-
-	memorySearchParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"query": map[string]string{
-				"type":        "string",
-				"description": "Search query for memory grep",
-			},
-		},
-		"required": []string{"query"},
-	}
-
-	memoryGetParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"reference": map[string]string{
-				"type":        "string",
-				"description": "Memory reference (file path)",
-			},
-			"tag": map[string]string{
-				"type":        "string",
-				"description": "Filter by tag",
-			},
-			"date": map[string]string{
-				"type":        "string",
-				"description": "Filter by date (YYYY-MM-DD)",
-			},
-		},
-	}
-
-	memoryWriteParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"entry": map[string]string{
-				"type":        "string",
-				"description": "Entry text to write to memory",
-			},
-		},
-		"required": []string{"entry"},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "memory_search",
-			Description: openai.String(descMemSearch),
-			Parameters:  memorySearchParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "memory_get",
-			Description: openai.String(descMemGet),
-			Parameters:  memoryGetParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "memory_write",
-			Description: openai.String(descMemWrite),
-			Parameters:  memoryWriteParams,
-		}),
-	}
-}
-
-// luaTools returns the Lua execution tool.
-func (c *Client) luaTools() []openai.ChatCompletionToolUnionParam {
-	descExec := "Execute Lua code in the sandbox"
-
-	luaExecParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"script": map[string]string{
-				"type":        "string",
-				"description": "Lua script to execute",
-			},
-		},
-		"required": []string{"script"},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "lua_exec",
-			Description: openai.String(descExec),
-			Parameters:  luaExecParams,
-		}),
-	}
-}
-
-// skillTools returns skill management tools: list, create.
-func (c *Client) skillTools() []openai.ChatCompletionToolUnionParam {
-	descList := "List all available skills"
-	descCreateSkill := "Create a new skill"
-
-	skillListParams := openai.FunctionParameters{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-
-	skillCreateParams := openai.FunctionParameters{
-		"type": "object",
-		"properties": map[string]any{
-			"name": map[string]string{
-				"type":        "string",
-				"description": "Name of the skill to create",
-			},
-			"description": map[string]string{
-				"type":        "string",
-				"description": "Description of the skill",
-			},
-			"instructions": map[string]string{
-				"type":        "string",
-				"description": "Instructions for the skill",
-			},
-		},
-		"required": []string{"name"},
-	}
-
-	return []openai.ChatCompletionToolUnionParam{
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "skill_list",
-			Description: openai.String(descList),
-			Parameters:  skillListParams,
-		}),
-		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-			Name:        "skill_create",
-			Description: openai.String(descCreateSkill),
-			Parameters:  skillCreateParams,
-		}),
-	}
-}
-
-// utilityTools returns miscellaneous utility tools: message, scientific_method_plan.
-func (c *Client) utilityTools() []openai.ChatCompletionToolUnionParam {
-	descMessage := "Send a message via Discord"
-	descScientificMethod := "Generate scientific method plan"
+// systemTools returns system/orchestration tools: message, scientific_method_plan.
+func (c *Client) systemTools() []openai.ChatCompletionToolUnionParam {
+	descMessage := "Send a message to the user (call this when you have the final response)"
+	descScientificMethod := "Generate a structured scientific method plan"
 
 	messageParams := openai.FunctionParameters{
 		"type": "object",
 		"properties": map[string]any{
 			"content": map[string]string{
 				"type":        "string",
-				"description": "Message content to send",
+				"description": "Message content to send to the user",
 			},
 		},
 		"required": []string{"content"},
@@ -760,6 +439,39 @@ func (c *Client) utilityTools() []openai.ChatCompletionToolUnionParam {
 			Name:        "scientific_method_plan",
 			Description: openai.String(descScientificMethod),
 			Parameters:  scientificMethodPlanParams,
+		}),
+	}
+}
+
+// luaExecTool returns the Lua execution tool — the primary gateway to all world interaction.
+func (c *Client) luaExecTool() []openai.ChatCompletionToolUnionParam {
+	descExec := `Execute Lua code in the sandbox. This is your PRIMARY tool for ANY interaction with the world.
+All capabilities are accessed through Lua modules:
+- file.read/write/edit/list — File operations
+- web.fetch/search — Web page fetching and searching
+- browser.navigate/click/type/screenshot — Browser automation
+- memory.today/get/write/search — Memory management
+- skill.list/exec/create — Skill management
+- scheduler.add/remove/list — Scheduled tasks
+- os.date/time — Date/time utilities
+- print() — Capture intermediate output`
+
+	luaExecParams := openai.FunctionParameters{
+		"type": "object",
+		"properties": map[string]any{
+			"script": map[string]string{
+				"type":        "string",
+				"description": "Lua script to execute. Use Lua modules for all operations.",
+			},
+		},
+		"required": []string{"script"},
+	}
+
+	return []openai.ChatCompletionToolUnionParam{
+		openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
+			Name:        "lua_exec",
+			Description: openai.String(descExec),
+			Parameters:  luaExecParams,
 		}),
 	}
 }
